@@ -745,9 +745,10 @@ func newEventParser() (parser *eventParser) {
 }
 
 func (mc *mysqlConn) DumpBinlog(filename string, position uint32) (driver.Rows, error) {
+	mc.sequence = 0
 	parser := newEventParser()
-	ServerId := uint32(1) // Must be non-zero to avoid getting EOF packet
-	flags := uint16(0)
+	ServerId := uint32(11) // Must be non-zero to avoid getting EOF packet
+	flags := uint16(2)
 
 	e := mc.writeCommandPacket(comBinlogDump, position, flags, ServerId, filename)
 	if e != nil {
