@@ -9,6 +9,7 @@
 package mysql
 
 import (
+	"bytes"
 	"crypto/tls"
 	"database/sql"
 	"database/sql/driver"
@@ -807,4 +808,84 @@ func mapIsolationLevel(level driver.IsolationLevel) (string, error) {
 	default:
 		return "", fmt.Errorf("mysql: unsupported isolation level: %v", level)
 	}
+}
+
+func bytesToUint16(b []byte) (n uint16) {
+	n |= uint16(b[0])
+	n |= uint16(b[1]) << 8
+	return
+}
+
+func readFixedLengthInteger(buf *bytes.Buffer, size int) (num uint64, err error) {
+	var b byte
+	num = 0
+	if buf.Len() < size {
+		return 0, io.EOF
+	}
+	for i := uint(0); i < uint(size); i++ {
+		b, err = buf.ReadByte()
+		num |= uint64(b) << (i * 8)
+	}
+	return
+}
+
+func readLengthEncodedInt(buf *bytes.Buffer) (num uint64, isNull bool, e error) {
+	var b byte
+
+	b, e = buf.ReadByte()
+	if e != nil {
+		return
+	}
+
+	switch {
+
+	// 0-250: value of first byte
+	case b <= 250:
+		num = uint64(b)
+		return
+
+	// 251: NULL
+	case b == 251:
+		num = 0
+		isNull = true
+		return
+
+	// 252: value of following 2
+	case b == 252:
+		var num16 uint16
+		binary.Read(buf, binary.LittleEndian, &num16)
+		num = uint64(num16)
+		return
+
+	// 253: value of following 3
+	case b == 253:
+		num, e = readFixedLengthInteger(buf, 3)
+		return
+
+	// 254: value of following 8
+	case b == 254:
+		e = binary.Read(buf, binary.LittleEndian, &num)
+		return
+
+	default:
+		e = errors.New("undefined value (0xff) length encoded integer")
+		return
+	}
+
+	return
+}
+
+func uint32ToBytes(n uint32) (b []byte) {
+	b = make([]byte, 4)
+	for i := uint8(0); i < 4; i++ {
+		b[i] = byte(n >> (i * 8))
+	}
+	return
+}
+
+func uint16ToBytes(n uint16) (b []byte) {
+	b = make([]byte, 2)
+	b[0] = byte(n)
+	b[1] = byte(n >> 8)
+	return
 }

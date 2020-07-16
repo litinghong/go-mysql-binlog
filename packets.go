@@ -418,7 +418,7 @@ func (mc *mysqlConn) writeAuthSwitchPacket(authData []byte) error {
 *                             Command Packets                                 *
 ******************************************************************************/
 
-func (mc *mysqlConn) writeCommandPacket(command byte) error {
+func (mc *mysqlConn) writeCommandPacket(command byte, args ...interface{}) error {
 	// Reset Packet Sequence
 	mc.sequence = 0
 
@@ -430,7 +430,19 @@ func (mc *mysqlConn) writeCommandPacket(command byte) error {
 	}
 
 	// Add command byte
-	data[4] = command
+	if command == comBinlogDump {
+		if len(args) != 4 {
+			return fmt.Errorf("Invalid arguments count (Got: %d Has: 4)", len(args))
+		}
+
+		var arg []byte
+		arg = uint32ToBytes(args[0].(uint32))
+		arg = append(arg, uint16ToBytes(args[1].(uint16))...)
+		arg = append(arg, uint32ToBytes(args[2].(uint32))...)
+		arg = append(arg, []byte(args[3].(string))...)
+	} else {
+		data[4] = command
+	}
 
 	// Send CMD packet
 	return mc.writePacket(data)
