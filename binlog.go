@@ -744,13 +744,80 @@ func newEventParser() (parser *eventParser) {
 	return
 }
 
-func (mc *mysqlConn) DumpBinlog(filename string, position uint32) (driver.Rows, error) {
+func (mc *mysqlConn) RegisterSlave(serverId uint32) error {
+
+	if e := mc.exec("set wait_timeout=9999999"); e != nil {
+		return e
+	}
+	if e := mc.exec("set net_write_timeout=1800"); e != nil {
+		return e
+	}
+	if e := mc.exec("set net_read_timeout=1800"); e != nil {
+		return e
+	}
+	if e := mc.exec("set names 'binary'"); e != nil {
+		return e
+	}
+	if e := mc.exec("set @master_binlog_checksum= @@global.binlog_checksum"); e != nil {
+		return e
+	}
+	if e := mc.exec("set @slave_uuid=uuid()"); e != nil {
+		return e
+	}
+	if e := mc.exec("SET @master_heartbeat_period=15"); e != nil {
+		return e
+	}
+
+	mc.sequence = 0
+
+	port := uint16(234)
+
+	data := make([]byte, 4+1+4+3+2+8)
+	data[4] = comRegisterSlave
+
+	data[5] = byte(serverId)
+	data[6] = byte(serverId >> 8)
+	data[7] = byte(serverId >> 16)
+	data[8] = byte(serverId >> 24)
+
+	data[12] = byte(port)
+	data[13] = byte(port >> 8)
+
+	if e := mc.writePacket(data); e != nil {
+		return e
+	}
+
+	return mc.readResultOK()
+}
+
+func (mc *mysqlConn) DumpBinlog(serverId uint32, filename string, position uint32) (driver.Rows, error) {
 	mc.sequence = 0
 	parser := newEventParser()
-	ServerId := uint32(11) // Must be non-zero to avoid getting EOF packet
 	flags := uint16(2)
 
-	e := mc.writeCommandPacket(comBinlogDump, position, flags, ServerId, filename)
+	// e := mc.writeCommandPacket(comRegisterSlave)
+
+	data := make([]byte, 4+1+4+2+4+len(filename))
+
+	data[4] = comBinlogDump
+
+	// binlog-pos [32 bit]
+	data[5] = byte(position)
+	data[6] = byte(position >> 8)
+	data[7] = byte(position >> 16)
+	data[8] = byte(position >> 24)
+
+	// flags [16 bit]
+	data[9] = byte(flags)
+	data[10] = byte(flags >> 8)
+
+	// server-id [32 bit]
+	data[11] = byte(serverId)
+	data[12] = byte(serverId >> 8)
+	data[13] = byte(serverId >> 16)
+	data[14] = byte(serverId >> 24)
+
+	e := mc.writePacket(data)
 	if e != nil {
 		return nil, e
 	}
