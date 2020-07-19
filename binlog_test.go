@@ -6,9 +6,8 @@ import (
 )
 import "database/sql/driver"
 import "fmt"
-import _ "github.com/go-sql-driver/mysql"
 
-const dataSource = "canal:canal@tcp(192.168.0.114:3307)/db_sync"
+const dataSource = "canal:canal@tcp(127.0.0.1:3307)/db_sync"
 
 func OpenDB() *sql.DB {
 	db, err := sql.Open("mysql", dataSource)
@@ -51,8 +50,7 @@ func Test_mysqlConn_DumpBinlog(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
-	//filename = "mysql-bin.000836"
-	//position = 4
+
 	rows, err := mysqlConn.DumpBinlog(serverId, filename, position)
 	if err != nil {
 		panic(err)

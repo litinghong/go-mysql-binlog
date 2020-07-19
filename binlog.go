@@ -594,14 +594,14 @@ func (parser *eventParser) parseEvent(data []byte) (event BinlogEvent, err error
 		return parseQueryEvent(buf)
 	case ROTATE_EVENT:
 		return parseRotateEvent(buf)
-	case TABLE_MAP_EVENT:
-		var table_map_event *TableMapEvent
-		table_map_event, err = parser.parseTableMapEvent(buf)
-		parser.tableMap[table_map_event.tableId] = table_map_event
-		event = table_map_event
-		return
-	case WRITE_ROWS_EVENTv1, UPDATE_ROWS_EVENTv1, DELETE_ROWS_EVENTv1:
-		return parser.parseRowsEvent(buf)
+	//case TABLE_MAP_EVENT:
+	//	var table_map_event *TableMapEvent
+	//	table_map_event, err = parser.parseTableMapEvent(buf)
+	//	parser.tableMap[table_map_event.tableId] = table_map_event
+	//	event = table_map_event
+	//	return
+	//case WRITE_ROWS_EVENTv1, UPDATE_ROWS_EVENTv1, DELETE_ROWS_EVENTv1:
+	//	return parser.parseRowsEvent(buf)
 	default:
 		return parseGenericEvent(buf)
 	}
@@ -791,54 +791,61 @@ func (mc *mysqlConn) RegisterSlave(serverId uint32) error {
 }
 
 func (mc *mysqlConn) DumpBinlog(serverId uint32, filename string, position uint32) (driver.Rows, error) {
-	mc.sequence = 0
 	parser := newEventParser()
 	flags := uint16(2)
 
-	// e := mc.writeCommandPacket(comRegisterSlave)
-
-	data := make([]byte, 4+1+4+2+4+len(filename))
-
-	data[4] = comBinlogDump
-
-	// binlog-pos [32 bit]
-	data[5] = byte(position)
-	data[6] = byte(position >> 8)
-	data[7] = byte(position >> 16)
-	data[8] = byte(position >> 24)
-
-	// flags [16 bit]
-	data[9] = byte(flags)
-	data[10] = byte(flags >> 8)
-
-	// server-id [32 bit]
-	data[11] = byte(serverId)
-	data[12] = byte(serverId >> 8)
-	data[13] = byte(serverId >> 16)
-	data[14] = byte(serverId >> 24)
-
-	e := mc.writePacket(data)
-	if e != nil {
-		return nil, e
-	}
-
 	for {
-		pkt, e := mc.readPacket()
+		mc.sequence = 0
+		data := make([]byte, 4+1+4+2+4+len(filename))
+
+		data[4] = comBinlogDump
+
+		// binlog-pos [32 bit]
+		data[5] = byte(position)
+		data[6] = byte(position >> 8)
+		data[7] = byte(position >> 16)
+		data[8] = byte(position >> 24)
+
+		// flags [16 bit]
+		data[9] = byte(flags)
+		data[10] = byte(flags >> 8)
+
+		// server-id [32 bit]
+		data[11] = byte(serverId)
+		data[12] = byte(serverId >> 8)
+		data[13] = byte(serverId >> 16)
+		data[14] = byte(serverId >> 24)
+
+		e := mc.writePacket(data)
 		if e != nil {
 			return nil, e
-		} else if pkt[0] == 254 { // EOF packet
-			break
 		}
-		if pkt[0] == 0 {
-			event, e := parser.parseEvent(pkt[1:])
+
+		for {
+			pkt, e := mc.readPacket()
 			if e != nil {
 				return nil, e
+			} else if pkt[0] == 254 { // EOF packet
+				break
 			}
-			event.Print()
-		} else {
-			fmt.Printf("Unknown packet:\n%s\n\n", hex.Dump(pkt))
+			if pkt[0] == 0 {
+				event, e := parser.parseEvent(pkt[1:])
+				if e != nil {
+					return nil, e
+				}
+				event.Print()
+
+				switch event.(type) {
+				case *RotateEvent:
+					rotateEvent := event.(*RotateEvent)
+					filename = rotateEvent.filename
+					position = uint32(rotateEvent.position)
+				}
+			} else {
+				fmt.Printf("Unknown packet:\n%s\n\n", hex.Dump(pkt))
+			}
+			fmt.Println()
 		}
-		fmt.Println()
 	}
 
 	return nil, nil
