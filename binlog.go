@@ -4,10 +4,9 @@ import (
 	"bytes"
 	"database/sql/driver"
 	"encoding/binary"
-	"io"
-
 	"encoding/hex"
 	"fmt"
+	"io"
 	"time"
 )
 
@@ -130,6 +129,28 @@ func (event *RotateEvent) Print() {
 	fmt.Printf("position: %v, filename: %#v\n", event.position, event.filename)
 }
 
+type HeartbeatEvent struct {
+	header   EventHeader
+	position uint64
+	filename string
+}
+
+func parsHeartbeatEvent(buf *bytes.Buffer) (event *HeartbeatEvent, err error) {
+	event = new(HeartbeatEvent)
+	err = binary.Read(buf, binary.LittleEndian, &event.header)
+	err = binary.Read(buf, binary.LittleEndian, &event.position)
+	return
+}
+
+func (event *HeartbeatEvent) Header() *EventHeader {
+	return &event.header
+}
+
+func (event *HeartbeatEvent) Print() {
+	event.header.Print()
+	fmt.Printf("position: %v, filename: %#v\n", event.position, event.filename)
+}
+
 type QueryEvent struct {
 	header        EventHeader
 	slaveProxyId  uint32
@@ -208,21 +229,82 @@ type RowsEvent struct {
 	rows                  []*[]driver.Value
 }
 
+type RowsEventV2 struct {
+	header                EventHeader
+	tableId               uint64
+	tableMap              *TableMapEvent
+	flags                 uint16
+	columnsPresentBitmap1 Bitfield
+	columnsPresentBitmap2 Bitfield
+	rows                  []*[]driver.Value
+}
+
+func (parser *eventParser) parseRowsEventV2(buf *bytes.Buffer) (event *RowsEventV2, err error) {
+	var columnCount uint64
+
+	event = new(RowsEventV2)
+	err = binary.Read(buf, binary.LittleEndian, &event.header)
+
+	headerSize := parser.format.eventTypeHeaderLengths[event.header.EventType-1]
+	var tableIdSize int
+	if headerSize == 6 {
+		tableIdSize = 4
+	} else {
+		tableIdSize = 6
+	}
+	event.tableId, err = readFixedLengthInteger(buf, tableIdSize)
+
+	err = binary.Read(buf, binary.LittleEndian, &event.flags)
+	columnCount, _, err = readLengthEncodedInt(buf)
+	fmt.Println("cols=", columnCount)
+
+	event.columnsPresentBitmap1 = Bitfield(buf.Next(int((columnCount + 7) / 8)))
+	switch event.header.EventType {
+	case UPDATE_ROWS_EVENTv1, UPDATE_ROWS_EVENTv2:
+		event.columnsPresentBitmap2 = Bitfield(buf.Next(int((columnCount + 7) / 8)))
+	}
+
+	event.tableMap = parser.tableMap[event.tableId]
+	for buf.Len() > 0 {
+		var row []driver.Value
+		row, err = parseEventRow(buf, event.tableMap)
+		if err != nil {
+			return
+		}
+
+		event.rows = append(event.rows, &row)
+	}
+
+	return
+}
+
+func (event *RowsEventV2) Header() *EventHeader {
+	return &event.header
+}
+
+func (event *RowsEventV2) Print() {
+	event.header.Print()
+}
+
 func parseEventRow(buf *bytes.Buffer, tableMap *TableMapEvent) (row []driver.Value, e error) {
 	columnsCount := len(tableMap.columnTypes)
 
 	row = make([]driver.Value, columnsCount)
 
-	bitfieldSize := (columnsCount + 7) / 8
-	nullBitMap := Bitfield(buf.Next(bitfieldSize))
+	bitFieldSize := (columnsCount + 7) / 8
+	nullBitMap := Bitfield(buf.Next(bitFieldSize))
 
+	//var fNull bool
 	for i := 0; i < columnsCount; i++ {
 		if nullBitMap.isSet(uint(i)) {
 			row[i] = nil
 			continue
 		}
 
-		switch tableMap.columnTypes[i] {
+		_fieldType := tableMap.columnTypes[i]
+		var fieldLen uint16
+
+		switch _fieldType {
 		case fieldTypeNULL:
 			row[i] = nil
 
@@ -270,9 +352,9 @@ func parseEventRow(buf *bytes.Buffer, tableMap *TableMapEvent) (row []driver.Val
 			return nil, fmt.Errorf("parseEventRow unimplemented for field type %s", fieldTypeName(tableMap.columnTypes[i]))
 
 		case fieldTypeVarChar:
-			max_length := tableMap.columnMeta[i]
+			maxLength := tableMap.columnMeta[i]
 			var length int
-			if max_length > 255 {
+			if maxLength > 255 {
 				var short uint16
 				e = binary.Read(buf, binary.LittleEndian, &short)
 				length = int(short)
@@ -286,15 +368,24 @@ func parseEventRow(buf *bytes.Buffer, tableMap *TableMapEvent) (row []driver.Val
 			}
 			row[i] = string(buf.Next(length))
 
+		case fieldTypeString:
+			if fieldLen < 256 {
+				var _fieldLenU8 uint8
+				e = binary.Read(buf, binary.LittleEndian, &_fieldLenU8)
+				row[i] = string(buf.Next(int(_fieldLenU8)))
+			} else {
+				var _fieldLenU16 uint8
+				e = binary.Read(buf, binary.LittleEndian, &_fieldLenU16)
+				row[i] = string(buf.Next(int(_fieldLenU16)))
+			}
 		case fieldTypeBLOB:
 			var length uint64
 			length, e = readFixedLengthInteger(buf, int(tableMap.columnMeta[i]))
 			row[i] = string(buf.Next(int(length)))
-
 		case fieldTypeBit, fieldTypeEnum,
 			fieldTypeSet, fieldTypeTinyBLOB, fieldTypeMediumBLOB,
 			fieldTypeLongBLOB, fieldTypeVarString,
-			fieldTypeString, fieldTypeGeometry:
+			fieldTypeGeometry:
 
 			return nil, fmt.Errorf("parseEventRow unimplemented for field type %s", fieldTypeName(tableMap.columnTypes[i]))
 
@@ -594,14 +685,19 @@ func (parser *eventParser) parseEvent(data []byte) (event BinlogEvent, err error
 		return parseQueryEvent(buf)
 	case ROTATE_EVENT:
 		return parseRotateEvent(buf)
-	//case TABLE_MAP_EVENT:
-	//	var table_map_event *TableMapEvent
-	//	table_map_event, err = parser.parseTableMapEvent(buf)
-	//	parser.tableMap[table_map_event.tableId] = table_map_event
-	//	event = table_map_event
-	//	return
-	//case WRITE_ROWS_EVENTv1, UPDATE_ROWS_EVENTv1, DELETE_ROWS_EVENTv1:
-	//	return parser.parseRowsEvent(buf)
+	case HEARTBEAT_EVENT:
+		return parsHeartbeatEvent(buf)
+	case TABLE_MAP_EVENT:
+		var tableMapEvent *TableMapEvent
+		tableMapEvent, err = parser.parseTableMapEvent(buf)
+		parser.tableMap[tableMapEvent.tableId] = tableMapEvent
+		event = tableMapEvent
+		return
+	case WRITE_ROWS_EVENTv1, UPDATE_ROWS_EVENTv1, DELETE_ROWS_EVENTv1:
+		return parser.parseRowsEvent(buf)
+	case UPDATE_ROWS_EVENTv2:
+		fmt.Printf("parseRowsEventV2 Data:\n%s\n\n", hex.Dump(data))
+		return parser.parseRowsEventV2(buf)
 	default:
 		return parseGenericEvent(buf)
 	}
@@ -830,16 +926,24 @@ func (mc *mysqlConn) DumpBinlog(serverId uint32, filename string, position uint3
 			}
 			if pkt[0] == 0 {
 				event, e := parser.parseEvent(pkt[1:])
-				if e != nil {
-					return nil, e
-				}
 				event.Print()
 
+				if e != nil {
+					if e.Error() != "EOF" {
+						return nil, e
+					}
+				}
 				switch event.(type) {
 				case *RotateEvent:
 					rotateEvent := event.(*RotateEvent)
 					filename = rotateEvent.filename
 					position = uint32(rotateEvent.position)
+				case *HeartbeatEvent:
+					continue
+				//case *RowsEvent:
+				//	rowsEvent := event.(*RowsEvent)
+				default:
+					event.Print()
 				}
 			} else {
 				fmt.Printf("Unknown packet:\n%s\n\n", hex.Dump(pkt))

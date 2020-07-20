@@ -7,7 +7,7 @@ import (
 import "database/sql/driver"
 import "fmt"
 
-const dataSource = "canal:canal@tcp(127.0.0.1:3307)/db_sync"
+const dataSource = "canal:canal@tcp(127.0.0.1:3306)/mysql"
 
 func OpenDB() *sql.DB {
 	db, err := sql.Open("mysql", dataSource)
