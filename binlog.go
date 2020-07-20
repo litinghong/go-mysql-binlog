@@ -514,7 +514,10 @@ func (event *TableMapEvent) parseColumnMetadata(data []byte) error {
 		case fieldTypeBLOB,
 			fieldTypeDouble,
 			fieldTypeFloat,
-			fieldTypeGeometry:
+			fieldTypeGeometry,
+			fieldTypeTime2,
+			fieldTypeDatetime2,
+			fieldTypeTimestamp2:
 			event.columnMeta[i] = uint16(data[pos])
 			pos += 1
 

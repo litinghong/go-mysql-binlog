@@ -110,6 +110,9 @@ const (
 	fieldTypeNewDate
 	fieldTypeVarChar
 	fieldTypeBit
+	fieldTypeTimestamp2
+	fieldTypeDatetime2
+	fieldTypeTime2
 )
 const (
 	fieldTypeJSON fieldType = iota + 0xf5
