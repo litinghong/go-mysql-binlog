@@ -234,13 +234,13 @@ type RowsEventV2 struct {
 	tableId               uint64
 	tableMap              *TableMapEvent
 	flags                 uint16
+	columnLen             int32
 	columnsPresentBitmap1 Bitfield
 	columnsPresentBitmap2 Bitfield
 	rows                  []*[]driver.Value
 }
 
 func (parser *eventParser) parseRowsEventV2(buf *bytes.Buffer) (event *RowsEventV2, err error) {
-	var columnCount uint64
 
 	event = new(RowsEventV2)
 	err = binary.Read(buf, binary.LittleEndian, &event.header)
@@ -255,24 +255,75 @@ func (parser *eventParser) parseRowsEventV2(buf *bytes.Buffer) (event *RowsEvent
 	event.tableId, err = readFixedLengthInteger(buf, tableIdSize)
 
 	err = binary.Read(buf, binary.LittleEndian, &event.flags)
-	columnCount, _, err = readLengthEncodedInt(buf)
-	fmt.Println("cols=", columnCount)
 
-	event.columnsPresentBitmap1 = Bitfield(buf.Next(int((columnCount + 7) / 8)))
-	switch event.header.EventType {
-	case UPDATE_ROWS_EVENTv1, UPDATE_ROWS_EVENTv2:
-		event.columnsPresentBitmap2 = Bitfield(buf.Next(int((columnCount + 7) / 8)))
+	// ROWS_HEADER_LEN_V2
+	if headerSize == 10 {
+		var headerLen uint16
+		err = binary.Read(buf, binary.LittleEndian, &headerLen)
+		headerLen -= 2
+	}
+
+	var columnLen int32
+	var lead uint8
+	err = binary.Read(buf, binary.LittleEndian, &lead)
+
+	if lead < 251 {
+		columnLen = int32(lead)
+	}
+	switch lead {
+	case 251:
+		columnLen = -1
+	case 252:
+		var _columnLenU16 uint16
+		err = binary.Read(buf, binary.LittleEndian, &_columnLenU16)
+		columnLen = int32(_columnLenU16)
+	case 253:
+		var pos1, pos2, pos3 byte
+		pos1, err = buf.ReadByte()
+		pos2, err = buf.ReadByte()
+		pos3, err = buf.ReadByte()
+		columnLen = int32((0xff & pos1) | ((0xff & pos2) << 8) | ((0xff & pos3) << 16))
+	}
+	event.columnLen = columnLen
+	fmt.Println("cols=", event.columnLen)
+
+	// columns bitSet
+	event.columnsPresentBitmap1 = Bitfield(buf.Next(int((event.columnLen + 7) / 8)))
+
+	// change columns bitSet
+	if event.header.EventType == UPDATE_ROWS_EVENTv2 {
+		event.columnsPresentBitmap2 = Bitfield(buf.Next(int((event.columnLen + 7) / 8)))
 	}
 
 	event.tableMap = parser.tableMap[event.tableId]
 	for buf.Len() > 0 {
-		var row []driver.Value
-		row, err = parseEventRow(buf, event.tableMap)
-		if err != nil {
-			return
+		switch event.header.EventType {
+		case WRITE_ROWS_EVENTv1, WRITE_ROWS_EVENTv2:
+			// insert的记录放在before字段中
+
+		case DELETE_ROWS_EVENTv1, DELETE_ROWS_EVENTv2:
+			// delete的记录放在before字段中
+
+		case UPDATE_ROWS_EVENTv2, UPDATE_ROWS_EVENTv1:
+			// update需要处理before/after
+			fmt.Println("-----> before")
+			var row []driver.Value
+			row, err = parseEventRow(buf, event.tableMap, event.columnsPresentBitmap1)
+			if err != nil {
+				return
+			}
+
+			event.rows = append(event.rows, &row)
+
+			fmt.Println("-----> after")
+			row, err = parseEventRow(buf, event.tableMap, event.columnsPresentBitmap2)
+			if err != nil {
+				return
+			}
+
+			event.rows = append(event.rows, &row)
 		}
 
-		event.rows = append(event.rows, &row)
 	}
 
 	return
@@ -286,7 +337,7 @@ func (event *RowsEventV2) Print() {
 	event.header.Print()
 }
 
-func parseEventRow(buf *bytes.Buffer, tableMap *TableMapEvent) (row []driver.Value, e error) {
+func parseEventRow(buf *bytes.Buffer, tableMap *TableMapEvent, nullBitMap Bitfield) (row []driver.Value, e error) {
 	columnsCount := len(tableMap.columnTypes)
 
 	row = make([]driver.Value, columnsCount)
@@ -296,8 +347,8 @@ func parseEventRow(buf *bytes.Buffer, tableMap *TableMapEvent) (row []driver.Val
 
 	//var fNull bool
 	for i := 0; i < columnsCount; i++ {
-		if nullBitMap.isSet(uint(i)) {
-			row[i] = nil
+		if !nullBitMap.isSet(uint(i)) {
+			//row[i] = nil
 			continue
 		}
 
@@ -449,7 +500,7 @@ func (parser *eventParser) parseRowsEvent(buf *bytes.Buffer) (event *RowsEvent, 
 	event.tableMap = parser.tableMap[event.tableId]
 	for buf.Len() > 0 {
 		var row []driver.Value
-		row, err = parseEventRow(buf, event.tableMap)
+		row, err = parseEventRow(buf, event.tableMap, event.columnsPresentBitmap2)
 		if err != nil {
 			return
 		}
@@ -491,6 +542,7 @@ type TableMapEvent struct {
 	flags       uint16
 	schemaName  string
 	tableName   string
+	columnCount uint64
 	columnTypes []fieldType
 	columnMeta  []uint16
 	nullBitmap  Bitfield
@@ -574,6 +626,7 @@ func (parser *eventParser) parseTableMapEvent(buf *bytes.Buffer) (event *TableMa
 	_, err = buf.ReadByte()
 
 	columnCount, _, err = readLengthEncodedInt(buf)
+	event.columnCount = columnCount
 	event.columnTypes = make([]fieldType, columnCount)
 	columnData := buf.Next(int(columnCount))
 	for i, b := range columnData {
@@ -699,7 +752,6 @@ func (parser *eventParser) parseEvent(data []byte) (event BinlogEvent, err error
 	case WRITE_ROWS_EVENTv1, UPDATE_ROWS_EVENTv1, DELETE_ROWS_EVENTv1:
 		return parser.parseRowsEvent(buf)
 	case UPDATE_ROWS_EVENTv2:
-		fmt.Printf("parseRowsEventV2 Data:\n%s\n\n", hex.Dump(data))
 		return parser.parseRowsEventV2(buf)
 	default:
 		return parseGenericEvent(buf)
@@ -843,7 +895,7 @@ func newEventParser() (parser *eventParser) {
 	return
 }
 
-func (mc *mysqlConn) RegisterSlave(serverId uint32) error {
+func (mc *mysqlConn) RegisterSlave(serverId uint32, host, user, pwd string) error {
 
 	if e := mc.exec("set wait_timeout=9999999"); e != nil {
 		return e
@@ -863,26 +915,33 @@ func (mc *mysqlConn) RegisterSlave(serverId uint32) error {
 	if e := mc.exec("set @slave_uuid=uuid()"); e != nil {
 		return e
 	}
-	if e := mc.exec("SET @master_heartbeat_period=15"); e != nil {
+	if e := mc.exec("SET @mariadb_slave_capability='4'"); e != nil {
+		return e
+	}
+	if e := mc.exec("SET @master_heartbeat_period=15000000000"); e != nil {
+		return e
+	}
+	if e := mc.exec("select @@global.binlog_checksum"); e != nil {
 		return e
 	}
 
 	mc.sequence = 0
 
-	port := uint16(234)
+	buf := new(bytes.Buffer)
+	buf.Write(make([]byte, 4))
+	buf.WriteByte(comRegisterSlave)
+	_ = binary.Write(buf, binary.LittleEndian, serverId)
+	buf.WriteByte(byte(len(host)))
+	buf.WriteString(host)
+	buf.WriteByte(byte(len(user)))
+	buf.WriteString(user)
+	buf.WriteByte(byte(len(pwd)))
+	buf.WriteString(pwd)
+	_ = binary.Write(buf, binary.LittleEndian, uint16(0))
+	_ = binary.Write(buf, binary.LittleEndian, uint32(0)) // fake
+	_ = binary.Write(buf, binary.LittleEndian, uint32(0)) // master id
 
-	data := make([]byte, 4+1+4+3+2+8)
-	data[4] = comRegisterSlave
-
-	data[5] = byte(serverId)
-	data[6] = byte(serverId >> 8)
-	data[7] = byte(serverId >> 16)
-	data[8] = byte(serverId >> 24)
-
-	data[12] = byte(port)
-	data[13] = byte(port >> 8)
-
-	if e := mc.writePacket(data); e != nil {
+	if e := mc.writePacket(buf.Bytes()); e != nil {
 		return e
 	}
 
@@ -947,6 +1006,7 @@ func (mc *mysqlConn) DumpBinlog(serverId uint32, filename string, position uint3
 				//	rowsEvent := event.(*RowsEvent)
 				default:
 					event.Print()
+					position = event.Header().LogPos
 				}
 			} else {
 				fmt.Printf("Unknown packet:\n%s\n\n", hex.Dump(pkt))

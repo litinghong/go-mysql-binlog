@@ -19,7 +19,7 @@ func OpenDB() *sql.DB {
 
 type MysqlConnection interface {
 	DumpBinlog(serverId uint32, filename string, position uint32) (driver.Rows, error)
-	RegisterSlave(serverId uint32) error
+	RegisterSlave(serverId uint32, host, user, pwd string) error
 }
 
 func Test_mysqlConn_DumpBinlog(t *testing.T) {
@@ -44,9 +44,9 @@ func Test_mysqlConn_DumpBinlog(t *testing.T) {
 		panic(err)
 	}
 
-	serverId := uint32(12345)
+	serverId := uint32(3)
 	mysqlConn := conn.(MysqlConnection)
-	err = mysqlConn.RegisterSlave(serverId)
+	err = mysqlConn.RegisterSlave(serverId, "127.0.0.1", "canal", "canal")
 	if err != nil {
 		panic(err)
 	}
